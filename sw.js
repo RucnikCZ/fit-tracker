@@ -1,4 +1,4 @@
-const CACHE = "fittracker-v1";
+const CACHE = "fittracker-v2";
 const PRECACHE = [
   "./",
   "./index.html",
