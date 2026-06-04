@@ -17,6 +17,12 @@ export async function syncToFirebase(userId) {
       } else if (op.type === "save_pr") {
         const ref = doc(firestore, `users/${userId}/prs/${encodeURIComponent(op.exerciseName)}`);
         await setDoc(ref, { weight: op.weight, date: Timestamp.fromDate(new Date(op.date)) });
+      } else if (op.type === "save_template") {
+        const ref = doc(firestore, `users/${userId}/templates/${op.data.id}`);
+        await setDoc(ref, op.data);
+      } else if (op.type === "delete_template") {
+        const ref = doc(firestore, `users/${userId}/templates/${op.id}`);
+        await deleteDoc(ref);
       }
       await localDB.clearSyncQueueItem(op.id);
     } catch (err) {
@@ -43,8 +49,43 @@ export async function fetchFromFirebase(userId) {
       const data = d.data();
       await localDB.savePR(userId, decodeURIComponent(d.id), data.weight, data.date?.toDate?.()?.toISOString() ?? data.date);
     }
+
+    const tplRef = collection(firestore, `users/${userId}/templates`);
+    const tplSnap = await getDocs(tplRef);
+    for (const d of tplSnap.docs) {
+      await localDB.saveTemplate({ ...d.data(), id: d.id, userId });
+    }
   } catch (err) {
     console.warn("Fetch from Firebase failed:", err);
+  }
+}
+
+export async function saveTemplate(userId, template) {
+  const tpl = { ...template, userId };
+  await localDB.saveTemplate(tpl);
+  if (navigator.onLine) {
+    try {
+      const ref = doc(firestore, `users/${userId}/templates/${template.id}`);
+      await setDoc(ref, tpl);
+    } catch {
+      await localDB.addToSyncQueue({ type: "save_template", data: tpl });
+    }
+  } else {
+    await localDB.addToSyncQueue({ type: "save_template", data: tpl });
+  }
+}
+
+export async function deleteTemplate(userId, templateId) {
+  await localDB.deleteTemplate(templateId);
+  if (navigator.onLine) {
+    try {
+      const ref = doc(firestore, `users/${userId}/templates/${templateId}`);
+      await deleteDoc(ref);
+    } catch {
+      await localDB.addToSyncQueue({ type: "delete_template", id: templateId });
+    }
+  } else {
+    await localDB.addToSyncQueue({ type: "delete_template", id: templateId });
   }
 }
 

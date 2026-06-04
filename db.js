@@ -1,6 +1,6 @@
 // Local IndexedDB wrapper — offline cache + sync queue
 const DB_NAME = "fittracker";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let _db = null;
 
@@ -20,6 +20,10 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("syncQueue")) {
         db.createObjectStore("syncQueue", { keyPath: "id", autoIncrement: true });
+      }
+      if (!db.objectStoreNames.contains("templates")) {
+        const ts = db.createObjectStore("templates", { keyPath: "id" });
+        ts.createIndex("userId", "userId");
       }
     };
     req.onsuccess = (e) => { _db = e.target.result; resolve(_db); };
@@ -86,6 +90,22 @@ export const localDB = {
 
   async clearSyncQueueItem(id) {
     const store = await tx("syncQueue", "readwrite");
+    return promisify(store.delete(id));
+  },
+
+  async saveTemplate(template) {
+    const store = await tx("templates", "readwrite");
+    return promisify(store.put(template));
+  },
+
+  async getTemplates(userId) {
+    const store = await tx("templates");
+    const idx = store.index("userId");
+    return promisify(idx.getAll(userId));
+  },
+
+  async deleteTemplate(id) {
+    const store = await tx("templates", "readwrite");
     return promisify(store.delete(id));
   }
 };

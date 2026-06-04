@@ -1,18 +1,21 @@
 import { auth, googleProvider } from "./config.js";
 import { signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { localDB } from "./db.js";
-import { saveWorkout, deleteWorkout, updatePR, fetchFromFirebase, syncToFirebase } from "./sync.js";
-import { WORKOUT_PLANS, WEEK_LABELS, MAIN_EXERCISES } from "./data.js";
+import { saveWorkout, deleteWorkout, updatePR, fetchFromFirebase, syncToFirebase, saveTemplate, deleteTemplate } from "./sync.js";
+import { WORKOUT_PLANS, WEEK_LABELS, MAIN_EXERCISES, EXERCISES_DB, RECOMMENDED_TEMPLATES } from "./data.js";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
   user: null,
-  view: "home",           // home | workout | history | detail | progress
+  view: "home",           // home | workout | history | detail | progress | templates | template-editor | exercise-picker
   workoutType: null,
   weekNumber: 1,
-  currentWorkout: null,   // workout being recorded
+  currentWorkout: null,
   workouts: [],
   prs: [],
+  templates: [],          // uživatelské šablony
+  editingTemplate: null,  // šablona právě editovaná
+  pickerCallback: null,   // callback pro exercise picker
   detailId: null,
   progressExercise: null,
   offlineMode: false
@@ -69,6 +72,12 @@ async function loadLocalData() {
   state.workouts = await localDB.getWorkouts(state.user.uid);
   state.workouts.sort((a, b) => new Date(b.date) - new Date(a.date));
   state.prs = await localDB.getPRs(state.user.uid);
+  state.templates = await localDB.getTemplates(state.user.uid);
+}
+
+// Helper: najde cvik v DB podle ID
+function getExercise(id) {
+  return EXERCISES_DB.find(e => e.id === id) ?? { id, name: id, category: "?", muscles: "", note: null };
 }
 
 function calcVolume(exercises) {
@@ -121,11 +130,37 @@ function buildNewWorkout(type, week) {
       const lastSet = lastEx?.sets?.[i];
       let weight = lastSet?.weight ?? 0;
       if (week === 4 && lastSet?.weight) weight = Math.round(lastSet.weight * deload / 2.5) * 2.5;
-      return {
-        weight,
-        reps: lastSet?.reps ?? defaultRepsNum,
-        completed: false
-      };
+      return { weight, reps: lastSet?.reps ?? defaultRepsNum, completed: false };
+    });
+
+    return { name: ex.name, sets };
+  });
+
+  return {
+    id: generateId(), type, week,
+    date: new Date().toISOString(),
+    note: "", exercises, totalVolume: 0
+  };
+}
+
+// Sestaví workout ze šablony (custom nebo recommended)
+function buildWorkoutFromTemplate(template, week) {
+  const deload = getDeloadFactor(week);
+  // Najdi poslední workout se stejnou šablonou pro ghost values
+  const last = state.workouts.find(w => w.templateId === template.id);
+
+  const exercises = template.exercises.map(tplEx => {
+    const ex = getExercise(tplEx.exerciseId);
+    const lastEx = last?.exercises?.find(e => e.name === ex.name);
+    const defaultReps = parseInt((tplEx.reps ?? "8").split("-")[0]);
+    let setsCount = tplEx.sets ?? 3;
+    if (week === 4) setsCount = Math.max(1, Math.round(setsCount * 0.6));
+
+    const sets = Array.from({ length: setsCount }, (_, i) => {
+      const lastSet = lastEx?.sets?.[i];
+      let weight = lastSet?.weight ?? 0;
+      if (week === 4 && weight) weight = Math.round(weight * deload / 2.5) * 2.5;
+      return { weight, reps: lastSet?.reps ?? defaultReps, completed: false };
     });
 
     return { name: ex.name, sets };
@@ -133,12 +168,12 @@ function buildNewWorkout(type, week) {
 
   return {
     id: generateId(),
-    type,
+    templateId: template.id,
+    templateName: template.name,
+    type: (template.category ?? "custom").toLowerCase(),
     week,
     date: new Date().toISOString(),
-    note: "",
-    exercises,
-    totalVolume: 0
+    note: "", exercises, totalVolume: 0
   };
 }
 
@@ -156,11 +191,14 @@ function render() {
   const main = document.createElement("main");
 
   switch (state.view) {
-    case "home":       main.appendChild(renderHome()); break;
-    case "workout":    main.appendChild(renderWorkout()); break;
-    case "history":    main.appendChild(renderHistory()); break;
-    case "detail":     main.appendChild(renderDetail()); break;
-    case "progress":   main.appendChild(renderProgress()); break;
+    case "home":             main.appendChild(renderHome()); break;
+    case "workout":          main.appendChild(renderWorkout()); break;
+    case "history":          main.appendChild(renderHistory()); break;
+    case "detail":           main.appendChild(renderDetail()); break;
+    case "progress":         main.appendChild(renderProgress()); break;
+    case "templates":        main.appendChild(renderTemplates()); break;
+    case "template-editor":  main.appendChild(renderTemplateEditor()); break;
+    case "exercise-picker":  main.appendChild(renderExercisePicker()); break;
   }
 
   root.appendChild(main);
@@ -200,10 +238,13 @@ function renderHeader() {
 
   const viewTitles = {
     home: "FITTRACKER",
-    workout: state.workoutType ? `${WORKOUT_PLANS[state.workoutType].label.toUpperCase()} · TÝDEN ${state.weekNumber}` : "TRÉNINK",
+    workout: state.currentWorkout ? `${state.currentWorkout.templateName?.toUpperCase() ?? "TRÉNINK"} · T${state.currentWorkout.week}` : "TRÉNINK",
     history: "HISTORIE",
     detail: "DETAIL",
-    progress: "PROGRESE"
+    progress: "PROGRESE",
+    templates: "TRÉNINKY",
+    "template-editor": state.editingTemplate?.id ? "UPRAVIT ŠABLONU" : "NOVÁ ŠABLONA",
+    "exercise-picker": "PŘIDAT CVIK",
   };
 
   el.innerHTML = `
@@ -226,13 +267,21 @@ function renderNavBar() {
   const el = document.createElement("nav");
   el.className = "bottom-nav";
   const items = [
-    { view: "home",     icon: "home",    label: "Domů" },
-    { view: "history",  icon: "list",    label: "Historie" },
-    { view: "progress", icon: "chart",   label: "Progrese" }
+    { view: "home",      icon: "home",      label: "Domů" },
+    { view: "templates", icon: "templates", label: "Tréninky" },
+    { view: "history",   icon: "list",      label: "Historie" },
+    { view: "progress",  icon: "chart",     label: "Progrese" }
   ];
 
+  const activeViews = {
+    home: ["home","workout"],
+    templates: ["templates","template-editor","exercise-picker"],
+    history: ["history","detail"],
+    progress: ["progress"]
+  };
+
   el.innerHTML = items.map(item => `
-    <button class="nav-item ${state.view === item.view || (item.view === "home" && state.view === "workout") ? "active" : ""}" data-view="${item.view}">
+    <button class="nav-item ${(activeViews[item.view] ?? [item.view]).includes(state.view) ? "active" : ""}" data-view="${item.view}">
       ${navIcon(item.icon)}
       <span>${item.label}</span>
     </button>
@@ -249,9 +298,10 @@ function renderNavBar() {
 
 function navIcon(name) {
   const icons = {
-    home: `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
-    list: `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
-    chart: `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`
+    home:      `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
+    templates: `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>`,
+    list:      `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
+    chart:     `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`
   };
   return icons[name] ?? "";
 }
@@ -690,6 +740,288 @@ function renderLineChart(points) {
       <text x="${(W - PAD).toFixed(1)}" y="${H - 8}" text-anchor="end" class="chart-axis-label">${formatDateShort(points[points.length - 1].date)}</text>
     </svg>
   `;
+}
+
+// ─── Templates list ───────────────────────────────────────────────────────────
+function renderTemplates() {
+  const el = document.createElement("div");
+  el.className = "view-templates";
+
+  const catColors = { Pull: "pull", Legs: "legs", Push: "push", Core: "text", Custom: "accent" };
+
+  const renderCard = (tpl, isCustom) => {
+    const exNames = tpl.exercises.map(e => getExercise(e.exerciseId).name).join(", ");
+    return `
+      <div class="tpl-card" data-id="${tpl.id}" data-custom="${isCustom}">
+        <div class="tpl-card-top">
+          <span class="tpl-name">${tpl.name}</span>
+          <span class="hi-type ${(catColors[tpl.category] ?? "text")}">${tpl.category ?? "Custom"}</span>
+        </div>
+        ${tpl.description ? `<div class="tpl-desc">${tpl.description}</div>` : ""}
+        <div class="tpl-exercises">${tpl.exercises.length} cviků · <span class="tpl-ex-list">${exNames}</span></div>
+        <div class="tpl-actions">
+          <button class="btn btn-primary btn-sm tpl-start-btn" data-id="${tpl.id}" data-custom="${isCustom}">Spustit</button>
+          ${isCustom ? `
+            <button class="btn btn-ghost btn-sm tpl-edit-btn" data-id="${tpl.id}">Upravit</button>
+            <button class="btn btn-ghost btn-sm tpl-delete-btn" data-id="${tpl.id}">Smazat</button>
+          ` : ""}
+        </div>
+      </div>
+    `;
+  };
+
+  el.innerHTML = `
+    <div class="tpl-week-row">
+      <span class="section-label" style="margin:0">TÝDEN CYKLU</span>
+      <div class="week-pills" style="margin:0">
+        ${[1,2,3,4].map(w => `
+          <button class="week-pill ${state.weekNumber === w ? "active" : ""}" data-week="${w}">
+            ${w === 4 ? "D" : `T${w}`}
+          </button>
+        `).join("")}
+      </div>
+    </div>
+
+    ${state.templates.length ? `
+      <section>
+        <label class="section-label">MOJE ŠABLONY</label>
+        <div class="tpl-list">${state.templates.map(t => renderCard(t, true)).join("")}</div>
+      </section>
+    ` : ""}
+
+    <button class="btn btn-ghost btn-lg" id="newTplBtn">
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Vytvořit vlastní trénink
+    </button>
+
+    <section>
+      <label class="section-label">DOPORUČENÉ ŠABLONY</label>
+      <div class="tpl-list">${RECOMMENDED_TEMPLATES.map(t => renderCard(t, false)).join("")}</div>
+    </section>
+  `;
+
+  el.querySelectorAll(".week-pill").forEach(btn => {
+    btn.addEventListener("click", () => { state.weekNumber = parseInt(btn.dataset.week); render(); });
+  });
+
+  el.querySelector("#newTplBtn").addEventListener("click", () => {
+    state.editingTemplate = { id: null, name: "", category: "Custom", description: "", exercises: [] };
+    navigate("template-editor");
+  });
+
+  el.querySelectorAll(".tpl-start-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const isCustom = btn.dataset.custom === "true";
+      const tpl = isCustom
+        ? state.templates.find(t => t.id === id)
+        : RECOMMENDED_TEMPLATES.find(t => t.id === id);
+      if (!tpl) return;
+      state.currentWorkout = buildWorkoutFromTemplate(tpl, state.weekNumber);
+      navigate("workout");
+    });
+  });
+
+  el.querySelectorAll(".tpl-edit-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.editingTemplate = { ...state.templates.find(t => t.id === btn.dataset.id) };
+      navigate("template-editor");
+    });
+  });
+
+  el.querySelectorAll(".tpl-delete-btn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Smazat tuto šablonu?")) return;
+      await deleteTemplate(state.user.uid, btn.dataset.id);
+      await loadLocalData();
+      render();
+    });
+  });
+
+  return el;
+}
+
+// ─── Template editor ──────────────────────────────────────────────────────────
+function renderTemplateEditor() {
+  const tpl = state.editingTemplate;
+  const el = document.createElement("div");
+  el.className = "view-template-editor";
+
+  el.innerHTML = `
+    <div class="card" style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label class="section-label">NÁZEV ŠABLONY</label>
+        <input type="text" class="set-input" id="tplName" placeholder="Např. Push — objem"
+          value="${tpl.name ?? ""}" style="width:100%;font-size:1.1rem;text-align:left;padding:10px 12px">
+      </div>
+      <div>
+        <label class="section-label">KATEGORIE</label>
+        <div class="seg-control-tpl" id="tplCategory">
+          ${["Pull","Legs","Push","Core","Custom"].map(c => `
+            <button class="seg-btn-tpl ${(tpl.category ?? "Custom") === c ? "active" : ""}" data-val="${c}">${c}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div>
+        <label class="section-label">POPIS (volitelné)</label>
+        <input type="text" class="set-input" id="tplDesc" placeholder="Krátký popis..."
+          value="${tpl.description ?? ""}" style="width:100%;font-size:1rem;text-align:left;padding:10px 12px">
+      </div>
+    </div>
+
+    <div>
+      <label class="section-label">CVIKY V ŠABLONĚ</label>
+      <div id="tplExercises" class="tpl-ex-list-edit">
+        ${(tpl.exercises ?? []).map((item, i) => {
+          const ex = getExercise(item.exerciseId);
+          return `
+            <div class="tpl-ex-row" data-idx="${i}">
+              <span class="tpl-ex-name">${ex.name}</span>
+              <div class="tpl-ex-sets">
+                <input type="number" class="set-input tpl-sets-input" inputmode="numeric"
+                  value="${item.sets ?? 3}" min="1" max="10" data-idx="${i}" data-field="sets"
+                  style="width:52px">
+                <span class="tpl-ex-x">×</span>
+                <input type="text" class="set-input tpl-reps-input" inputmode="text"
+                  value="${item.reps ?? "8-10"}" data-idx="${i}" data-field="reps"
+                  style="width:68px">
+              </div>
+              <button class="tpl-ex-remove" data-idx="${i}">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+          `;
+        }).join("")}
+      </div>
+      <button class="btn btn-ghost btn-sm" id="addExBtn" style="margin-top:8px;width:100%">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Přidat cvik
+      </button>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-direction:column">
+      <button class="btn btn-primary btn-lg" id="saveTplBtn">Uložit šablonu</button>
+      <button class="btn btn-ghost" id="cancelTplBtn">Zrušit</button>
+    </div>
+  `;
+
+  // Category selector
+  el.querySelectorAll(".seg-btn-tpl").forEach(btn => {
+    btn.addEventListener("click", () => {
+      el.querySelectorAll(".seg-btn-tpl").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.editingTemplate.category = btn.dataset.val;
+    });
+  });
+
+  // Live update name/desc
+  el.querySelector("#tplName").addEventListener("input", e => { state.editingTemplate.name = e.target.value; });
+  el.querySelector("#tplDesc").addEventListener("input", e => { state.editingTemplate.description = e.target.value; });
+
+  // Sets/reps inputs
+  el.querySelectorAll(".tpl-sets-input, .tpl-reps-input").forEach(input => {
+    input.addEventListener("change", e => {
+      const idx = parseInt(e.target.dataset.idx);
+      const field = e.target.dataset.field;
+      state.editingTemplate.exercises[idx][field] = field === "sets" ? parseInt(e.target.value) : e.target.value;
+    });
+  });
+
+  // Remove exercise
+  el.querySelectorAll(".tpl-ex-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.idx);
+      state.editingTemplate.exercises.splice(idx, 1);
+      render();
+    });
+  });
+
+  // Add exercise → picker
+  el.querySelector("#addExBtn").addEventListener("click", () => {
+    state.pickerCallback = (ex) => {
+      state.editingTemplate.exercises.push({ exerciseId: ex.id, sets: 3, reps: "8-10" });
+      navigate("template-editor");
+    };
+    navigate("exercise-picker");
+  });
+
+  el.querySelector("#saveTplBtn").addEventListener("click", async () => {
+    const tpl = state.editingTemplate;
+    if (!tpl.name.trim()) { showToast("Zadej název šablony", "error"); return; }
+    if (!tpl.exercises.length) { showToast("Přidej alespoň jeden cvik", "error"); return; }
+    if (!tpl.id) tpl.id = generateId();
+    await saveTemplate(state.user.uid, tpl);
+    await loadLocalData();
+    showToast("Šablona uložena");
+    navigate("templates");
+  });
+
+  el.querySelector("#cancelTplBtn").addEventListener("click", () => navigate("templates"));
+
+  return el;
+}
+
+// ─── Exercise picker ──────────────────────────────────────────────────────────
+function renderExercisePicker() {
+  const el = document.createElement("div");
+  el.className = "view-exercise-picker";
+
+  const categories = [...new Set(EXERCISES_DB.map(e => e.category))];
+
+  el.innerHTML = `
+    <input type="text" class="set-input picker-search" id="pickerSearch"
+      placeholder="Hledat cvik..."
+      style="width:100%;font-size:1rem;text-align:left;padding:10px 12px;margin-bottom:12px">
+
+    <div id="pickerList">
+      ${categories.map(cat => `
+        <div class="picker-cat">
+          <label class="section-label">${cat.toUpperCase()}</label>
+          ${EXERCISES_DB.filter(e => e.category === cat).map(ex => `
+            <button class="picker-ex-row" data-id="${ex.id}">
+              <div>
+                <div class="picker-ex-name">${ex.name}</div>
+                <div class="picker-ex-muscles">${ex.muscles}</div>
+              </div>
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          `).join("")}
+        </div>
+      `).join("")}
+    </div>
+
+    <button class="btn btn-ghost" id="pickerCancelBtn" style="width:100%;margin-top:12px">Zrušit</button>
+  `;
+
+  // Live search
+  el.querySelector("#pickerSearch").addEventListener("input", (e) => {
+    const q = e.target.value.toLowerCase();
+    el.querySelectorAll(".picker-ex-row").forEach(row => {
+      const match = row.textContent.toLowerCase().includes(q);
+      row.style.display = match ? "" : "none";
+    });
+    el.querySelectorAll(".picker-cat").forEach(cat => {
+      const visible = [...cat.querySelectorAll(".picker-ex-row")].some(r => r.style.display !== "none");
+      cat.style.display = visible ? "" : "none";
+    });
+  });
+
+  el.querySelectorAll(".picker-ex-row").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const ex = EXERCISES_DB.find(e => e.id === btn.dataset.id);
+      if (ex && state.pickerCallback) {
+        state.pickerCallback(ex);
+        state.pickerCallback = null;
+      }
+    });
+  });
+
+  el.querySelector("#pickerCancelBtn").addEventListener("click", () => navigate("template-editor"));
+
+  return el;
 }
 
 // ─── Export / Import ──────────────────────────────────────────────────────────
