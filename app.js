@@ -742,5 +742,5 @@ render();
 
 // Register Service Worker
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(console.warn);
+  navigator.serviceWorker.register("./sw.js").catch(console.warn);
 }

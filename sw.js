@@ -1,15 +1,14 @@
 const CACHE = "fittracker-v1";
 const PRECACHE = [
-  "/",
-  "/index.html",
-  "/style.css",
-  "/app.js",
-  "/data.js",
-  "/db.js",
-  "/sync.js",
-  "/config.js",
-  "/manifest.json",
-  "https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow+Condensed:wght@300;400;500;600;700&display=swap"
+  "./",
+  "./index.html",
+  "./style.css",
+  "./app.js",
+  "./data.js",
+  "./db.js",
+  "./sync.js",
+  "./config.js",
+  "./manifest.json"
 ];
 
 self.addEventListener("install", (e) => {

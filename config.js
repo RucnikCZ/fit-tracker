@@ -5,23 +5,23 @@
 //  3. Zkopíruj celý firebaseConfig objekt a vlož ho sem
 // ============================================================
 
-const firebaseConfig = {
-  apiKey: "VLOZ_SEM_API_KEY",
-  authDomain: "VLOZ_SEM_AUTH_DOMAIN",
-  projectId: "VLOZ_SEM_PROJECT_ID",
-  storageBucket: "VLOZ_SEM_STORAGE_BUCKET",
-  messagingSenderId: "VLOZ_SEM_MESSAGING_SENDER_ID",
-  appId: "VLOZ_SEM_APP_ID"
-};
-
-// ============================================================
-//  NASTAVENÍ FIREBASE SERVICES
-//  Neměň nic níže, pokud nevíš co děláš
-// ============================================================
-
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ============================================================
+//  VLOŽ SEM SVŮJ firebaseConfig (zkopíruj z Firebase Console)
+// ============================================================
+
+const firebaseConfig = {
+    apiKey: "AIzaSyBTWroD3jZDd132bE7SDu-hDddFwQ4azMs",
+    authDomain: "fittracker-bb096.firebaseapp.com",
+    projectId: "fittracker-bb096",
+    storageBucket: "fittracker-bb096.firebasestorage.app",
+    messagingSenderId: "284356350621",
+    appId: "1:284356350621:web:32a2cc4550621a841a3a74",
+    measurementId: "G-BSS5GSTE3N"
+};
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
