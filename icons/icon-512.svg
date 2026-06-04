@@ -1,0 +1,5 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='512' height='512'>
+  <rect width='512' height='512' fill='#0d0d0d'/>
+  <text x='256' y='260' font-family='Arial' font-weight='bold' font-size='610' fill='#FFD700' text-anchor='middle' dominant-baseline='middle'>FT</text>
+  <rect x='61' y='368' width='390' height='30' fill='#FFD700'/>
+</svg>
